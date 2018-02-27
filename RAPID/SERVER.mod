@@ -4,56 +4,61 @@ MODULE SERVER
 !GLOBAL VARIABLES
 !////////////////
 
-!//Robot configuration
-PERS tooldata currentTool := [TRUE,[[163,-16.1,83.7],[0.00255,0.99983,-0.01232,-0.01355]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]];    
-PERS wobjdata currentWobj := [FALSE,TRUE,"",[[0,0,0],[1,0,0,0]],[[23.2,-901.8,101.8],[0.70694,0.00152,-0.70725,-0.00603]]];   
+! Robot configuration
+PERS tooldata currentTool := [TRUE,[[0,0,0],[1,0,0,0]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]];
+PERS wobjdata currentWobj := [FALSE,TRUE,"",[[0,0,0],[1,0,0,0]],[[0,0,0],[1,0,0,0]]];
 PERS speeddata currentSpeed;
 PERS zonedata currentZone;
 
-!// Clock Synchronization
-PERS bool startLog:=TRUE;
-PERS bool startRob:=TRUE;
+! Clock Synchronization
+PERS bool startLog := TRUE;
+PERS bool startRob := TRUE;
 
-!// Mutex between logger and changing the tool and work objects
-PERS bool frameMutex:=FALSE;
+! Mutex between logger and changing the tool and work objects,
+! blocks access to a variable while its parameters are being changed.
+PERS bool frameMutex := FALSE;
 
-!//PC communication
+! PC communication
 VAR socketdev clientSocket;
 VAR socketdev serverSocket;
+
+! Virtual representation of the parsed instruction
 VAR num instructionCode;
-VAR num params{10};
-VAR num nParams;
+VAR num params{10};   ! JL array declaration, init with VAR num params{5} := [1, 2, 3, 4, 5];
+VAR num nParams;  ! How many params were received with the last msg
 
-PERS string ipController:= "192.168.125.1"; !robot default IP
-!PERS string ipController:= "127.0.0.1"; !local IP for testing in simulation
-PERS num serverPort:= 5000;
+!PERS string ipController:= "192.168.125.1";  ! default controller service port address
+PERS string ipController := "127.0.0.1";  ! local IP for testing in simulation
+PERS num serverPort := 5000;
 
-!//Motion of the robot
+! Motion of the robot
 VAR robtarget cartesianTarget;
 VAR jointtarget jointsTarget;
-VAR bool moveCompleted; !Set to true after finishing a Move instruction.
+VAR bool moveCompleted;      ! Set to true after finishing a Move instruction.
 
-!//Buffered move variables
-CONST num MAX_BUFFER := 1024;
+! Buffered move variables
+! --> JL: this is where the limitation lies, only robtargets can be Buffered
+!       Redo with a RECORD that allows buffering any command
+CONST num MAX_BUFFER := 512;
 VAR num BUFFER_POS := 0;
-VAR jointtarget bufferTargets{MAX_BUFFER};
-!VAR speeddata bufferSpeeds{MAX_BUFFER};
-VAR num bufferTimes{MAX_BUFFER};
+VAR robtarget bufferTargets{MAX_BUFFER};
+VAR speeddata bufferSpeeds{MAX_BUFFER};
 
-!//External axis position variables
+! External axis position variables
 VAR extjoint externalAxis;
 
-!//Circular move buffer
+! Circular move buffer
+! --> JL yet not supported by MACHINA
 VAR robtarget circPoint;
 
-!//Correct Instruction Execution and possible return values
+! Correct Instruction Execution and possible return values
 VAR num ok;
 CONST num SERVER_BAD_MSG :=  0;
 CONST num SERVER_OK := 1;
 
 
 
-	
+
 !////////////////
 !LOCAL METHODS
 !////////////////
@@ -72,7 +77,7 @@ PROC ParseMsg(string msg)
     VAR num indParam:=1;
     VAR string subString;
     VAR bool end := FALSE;
-	
+
     !//Find the end character
     length := StrMatch(msg,1,"#");
     IF length > StrLen(msg) THEN
@@ -98,7 +103,7 @@ PROC ParseMsg(string msg)
                     auxOk := StrToVal(subString, params{indParam});
                     indParam := indParam + 1;
                     ind := newInd;
-                ENDIF	   
+                ENDIF
             ENDWHILE
             nParams:= indParam - 1;
         ENDIF
@@ -106,24 +111,24 @@ PROC ParseMsg(string msg)
 ENDPROC
 
 
-!//Handshake between server and client:
-!// - Creates socket.
-!// - Waits for incoming TCP connection.
+! Handshake between server and client:
+! - Creates socket.
+! - Waits for incoming TCP connection (blocks thread until incoming connection is detected)
+! - On successful connection, updates clientSocket and moves on
 PROC ServerCreateAndConnect(string ip, num port)
     VAR string clientIP;
-	
-    SocketCreate serverSocket;
+
+    SocketCreate serverSocket;  ! create a Socket and ref it on serverSocket
     SocketBind serverSocket, ip, port;
     SocketListen serverSocket;
     TPWrite "SERVER: Server waiting for incoming connections ...";
     WHILE SocketGetStatus(clientSocket) <> SOCKET_CONNECTED DO
-        SocketAccept serverSocket,clientSocket \ClientAddress:=clientIP \Time:=WAIT_MAX;
+        SocketAccept serverSocket, clientSocket \ClientAddress:=clientIP \Time:=WAIT_MAX;  ! Blocking function to wait for incoming socket connection. On connection, clientSocket is ref'd the socketdev and clientIP is updated
         IF SocketGetStatus(clientSocket) <> SOCKET_CONNECTED THEN
             TPWrite "SERVER: Problem serving an incoming connection.";
             TPWrite "SERVER: Try reconnecting.";
         ENDIF
-        !//Wait 0.5 seconds for the next reconnection
-        WaitTime 0.5;
+        WaitTime 0.5;  ! Wait for next reconnection
     ENDWHILE
     TPWrite "SERVER: Connected to IP " + clientIP;
 ENDPROC
@@ -136,14 +141,14 @@ ENDPROC
 !// - Zone.
 !// - Speed.
 PROC Initialize()
-    currentTool := [TRUE,[[0,0,0],[1,0,0,0]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]];    
+    currentTool := [TRUE,[[0,0,0],[1,0,0,0]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]];
     currentWobj := [FALSE,TRUE,"",[[0,0,0],[1,0,0,0]],[[0,0,0],[1,0,0,0]]];
     currentSpeed := [100, 50, 0, 0];
-    currentZone := [FALSE, 0.3, 0.3,0.3,0.03,0.3,0.03]; !z0
-	
-	!Find the current external axis values so they don't move when we start
-	jointsTarget := CJointT();
-	externalAxis := jointsTarget.extax;
+    currentZone := [FALSE, 0.3, 0.3, 0.3, 0.03, 0.3, 0.03]; !z0
+
+        !Find the current external axis values so they don't move when we start
+        jointsTarget := CJointT();
+        externalAxis := jointsTarget.extax;
 ENDPROC
 
 
@@ -159,162 +164,174 @@ PROC main()
     VAR bool reconnected;        !//Drop and reconnection happened during serving a command
     VAR robtarget cartesianPose;
     VAR jointtarget jointsPose;
-    			
+
     !//Motion configuration
-    ConfJ \Off;
     ConfL \Off;
     SingArea \Wrist;
-    moveCompleted:= TRUE;
-	
+    moveCompleted := TRUE;
+
     !//Initialization of WorkObject, Tool, Speed and Zone
     Initialize;
-    
+
     !//Socket connection
-    connected:=FALSE;
-    ServerCreateAndConnect ipController,serverPort;	
-    connected:=TRUE;
-    
+    connected := FALSE;
+    ServerCreateAndConnect ipController, serverPort;
+    connected := TRUE;
+
     !//Server Loop
     WHILE TRUE DO
         !//Initialization of program flow variables
-        ok:=SERVER_OK;              !//Correctness of executed instruction.
-        reconnected:=FALSE;         !//Has communication dropped after receiving a command?
-        addString := "";            
+        ok := SERVER_OK;              !//Correctness of executed instruction.
+        reconnected := FALSE;         !//Has communication dropped after receiving a command?
+        addString := "";
 
         !//Wait for a command
-        SocketReceive clientSocket \Str:=receivedString \Time:=WAIT_MAX;
+        SocketReceive clientSocket \Str:=receivedString \Time:=WAIT_MAX;  ! JL this blocks, right?
         ParseMsg receivedString;
+
         !//Execution of the command
         TEST instructionCode
-            CASE 0: !Ping
+                        ! Ping
+            CASE 0:
                 IF nParams = 0 THEN
                     ok := SERVER_OK;
                 ELSE
                     ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 1: !Cartesian Move
-                IF nParams = 8 THEN
-                    cartesianTarget :=[[params{1},params{2},params{3}],
+                      ! Cartesian Move
+            CASE 1:
+                IF nParams = 7 THEN
+                    cartesianTarget := [[params{1},params{2},params{3}],
                                        [params{4},params{5},params{6},params{7}],
                                        [0,0,0,0],
                                        externalAxis];
                     ok := SERVER_OK;
                     moveCompleted := FALSE;
-                    IF params{8} = 1 THEN
-                        MoveL cartesianTarget, currentSpeed, currentZone, currentTool \WObj:=currentWobj ;
-                    ELSE
-                        MoveJ cartesianTarget, currentSpeed, currentZone, currentTool \WObj:=currentWobj ;
-                    ENDIF
+                    MoveL cartesianTarget, currentSpeed, currentZone, currentTool \WObj:=currentWobj;
                     moveCompleted := TRUE;
                 ELSE
                     ok := SERVER_BAD_MSG;
-                ENDIF	
-				
-            CASE 2: !Joint Move
+                ENDIF
+
+                      ! Joint Move
+            CASE 2:
                 IF nParams = 6 THEN
-                    jointsTarget:=[[params{1},params{2},params{3},params{4},params{5},params{6}], externalAxis];
+                    jointsTarget := [[params{1},params{2},params{3},params{4},params{5},params{6}],
+                                                                        externalAxis];
                     ok := SERVER_OK;
                     moveCompleted := FALSE;
                     MoveAbsJ jointsTarget, currentSpeed, currentZone, currentTool \Wobj:=currentWobj;
                     moveCompleted := TRUE;
                 ELSE
+                    ok := SERVER_BAD_MSG;
+                ENDIF
+
+                        ! Get Cartesian Coordinates (with current tool and workobject)
+            CASE 3:
+                IF nParams = 0 THEN
+                    cartesianPose := CRobT(\Tool:=currentTool \WObj:=currentWObj);
+                    addString := NumToStr(cartesianPose.trans.x, 2) + " ";
+                    addString := addString + NumToStr(cartesianPose.trans.y, 2) + " ";
+                    addString := addString + NumToStr(cartesianPose.trans.z, 2) + " ";
+                    addString := addString + NumToStr(cartesianPose.rot.q1, 3) + " ";
+                    addString := addString + NumToStr(cartesianPose.rot.q2, 3) + " ";
+                    addString := addString + NumToStr(cartesianPose.rot.q3, 3) + " ";
+                    addString := addString + NumToStr(cartesianPose.rot.q4, 3);
+                    ok := SERVER_OK;
+                ELSE
                     ok :=SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 3: !Get Cartesian Coordinates (with current tool and workobject)
-                IF nParams = 0 THEN
-                    cartesianPose := CRobT(\Tool:=currentTool \WObj:=currentWObj);		
-                    addString := NumToStr(cartesianPose.trans.x,2) + " ";
-                    addString := addString + NumToStr(cartesianPose.trans.y,2) + " ";
-                    addString := addString + NumToStr(cartesianPose.trans.z,2) + " ";
-                    addString := addString + NumToStr(cartesianPose.rot.q1,3) + " ";
-                    addString := addString + NumToStr(cartesianPose.rot.q2,3) + " ";
-                    addString := addString + NumToStr(cartesianPose.rot.q3,3) + " ";
-                    addString := addString + NumToStr(cartesianPose.rot.q4,3); !End of string	
-                    ok := SERVER_OK;
-                ELSE
-                    ok :=SERVER_BAD_MSG;
-                ENDIF
-
-            CASE 4: !Get Joint Coordinates
+                        ! Get Joint Coordinates
+            CASE 4:
                 IF nParams = 0 THEN
                     jointsPose := CJointT();
-                    addString := NumToStr(jointsPose.robax.rax_1,2) + " ";
-                    addString := addString + NumToStr(jointsPose.robax.rax_2,2) + " ";
-                    addString := addString + NumToStr(jointsPose.robax.rax_3,2) + " ";
-                    addString := addString + NumToStr(jointsPose.robax.rax_4,2) + " ";
-                    addString := addString + NumToStr(jointsPose.robax.rax_5,2) + " ";
-                    addString := addString + NumToStr(jointsPose.robax.rax_6,2); !End of string
+                    addString := NumToStr(jointsPose.robax.rax_1, 2) + " ";
+                    addString := addString + NumToStr(jointsPose.robax.rax_2, 2) + " ";
+                    addString := addString + NumToStr(jointsPose.robax.rax_3, 2) + " ";
+                    addString := addString + NumToStr(jointsPose.robax.rax_4, 2) + " ";
+                    addString := addString + NumToStr(jointsPose.robax.rax_5, 2) + " ";
+                    addString := addString + NumToStr(jointsPose.robax.rax_6, 2);
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
-			CASE 5: !Get external axis positions
+
+                        ! Get external axis positions
+                        CASE 5:
                 IF nParams = 0 THEN
                     jointsPose := CJointT();
-                    addString := StrPart(NumToStr(jointsTarget.extax.eax_a, 2),1,8) + " ";
-                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_b,2),1,8) + " ";
-                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_c,2),1,8) + " ";
-                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_d,2),1,8) + " ";
-                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_e,2),1,8) + " ";
-                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_f,2),1,8); !End of string
+                    addString := StrPart(NumToStr(jointsTarget.extax.eax_a, 2), 1, 8) + " ";  ! StrPart returns a subsring of 8 chars starting at index 1 (first index in RAPID)
+                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_b,2), 1, 8) + " ";
+                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_c,2), 1, 8) + " ";
+                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_d,2), 1, 8) + " ";
+                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_e,2), 1, 8) + " ";
+                    addString := addString + StrPart(NumToStr(jointsTarget.extax.eax_f,2), 1, 8);
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
-                ENDIF	
-		
-            CASE 6: !Set Tool
-                IF nParams = 7 THEN
-		   WHILE (frameMutex) DO
-		        WaitTime .01; !// If the frame is being used by logger, wait here
-		   ENDWHILE
-		frameMutex:= TRUE;
-                    currentTool.tframe.trans.x:=params{1};
-                    currentTool.tframe.trans.y:=params{2};
-                    currentTool.tframe.trans.z:=params{3};
-                    currentTool.tframe.rot.q1:=params{4};
-                    currentTool.tframe.rot.q2:=params{5};
-                    currentTool.tframe.rot.q3:=params{6};
-                    currentTool.tframe.rot.q4:=params{7};
-                    ok := SERVER_OK;
-		    frameMutex:= FALSE;
-                ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 7: !Set Work Object
+                        ! Set Tool
+            CASE 6:
                 IF nParams = 7 THEN
-                    currentWobj.oframe.trans.x:=params{1};
-                    currentWobj.oframe.trans.y:=params{2};
-                    currentWobj.oframe.trans.z:=params{3};
-                    currentWobj.oframe.rot.q1:=params{4};
-                    currentWobj.oframe.rot.q2:=params{5};
-                    currentWobj.oframe.rot.q3:=params{6};
-                    currentWobj.oframe.rot.q4:=params{7};
+                                    WHILE (frameMutex) DO
+                                        WaitTime .01;  ! If the frame is being used by logger, wait here
+                                    ENDWHILE
+                                        frameMutex := TRUE;
+                    currentTool.tframe.trans.x := params{1};
+                    currentTool.tframe.trans.y := params{2};
+                    currentTool.tframe.trans.z := params{3};
+                    currentTool.tframe.rot.q1 := params{4};
+                    currentTool.tframe.rot.q2 := params{5};
+                    currentTool.tframe.rot.q3 := params{6};
+                    currentTool.tframe.rot.q4 := params{7};
                     ok := SERVER_OK;
+                                    frameMutex := FALSE;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 8: !Set Speed of the Robot
+                        ! Set Work Object
+            CASE 7:
+                IF nParams = 7 THEN
+                                        ! --> JL: shouldn't this be blocked by frameMutex too?
+                    currentWobj.oframe.trans.x := params{1};
+                    currentWobj.oframe.trans.y := params{2};
+                    currentWobj.oframe.trans.z := params{3};
+                    currentWobj.oframe.rot.q1 := params{4};
+                    currentWobj.oframe.rot.q2 := params{5};
+                    currentWobj.oframe.rot.q3 := params{6};
+                    currentWobj.oframe.rot.q4 := params{7};
+                    ok := SERVER_OK;
+                ELSE
+                    ok := SERVER_BAD_MSG;
+                ENDIF
+
+                        ! Set Speed of the Robot
+            CASE 8:
+                                ! --> JL and prob this should be blocked too
                 IF nParams = 4 THEN
-                    currentSpeed.v_tcp:=params{1};
-                    currentSpeed.v_ori:=params{2};
-                    currentSpeed.v_leax:=params{3};
-                    currentSpeed.v_reax:=params{4};
+                    currentSpeed.v_tcp := params{1};
+                    currentSpeed.v_ori := params{2};
+                    currentSpeed.v_leax := params{3};
+                    currentSpeed.v_reax := params{4};
                     ok := SERVER_OK;
+
                 ELSEIF nParams = 2 THEN
-					currentSpeed.v_tcp:=params{1};
-					currentSpeed.v_ori:=params{2};
-					ok := SERVER_OK;
-				ELSE
-                    ok:=SERVER_BAD_MSG;
+                                        currentSpeed.v_tcp := params{1};
+                                        currentSpeed.v_ori := params{2};
+                                        ok := SERVER_OK;
+                                ELSE
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 9: !Set zone data
+                        ! Set zone data
+            CASE 9:
+                                ! JL block this too?
                 IF nParams = 4 THEN
-                    IF params{1}=1 THEN
+                    IF params{1} = 1 THEN
                         currentZone.finep := TRUE;
                         currentZone.pzone_tcp := 0.0;
                         currentZone.pzone_ori := 0.0;
@@ -327,68 +344,61 @@ PROC main()
                     ENDIF
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
-                
-            CASE 11: !Set servos
-                IF nParams = 6 THEN
-                    SoftDeact;
-                    SoftAct 1, params{1};
-                    SoftAct 2, params{2};
-                    SoftAct 3, params{3};
-                    SoftAct 4, params{4};
-                    SoftAct 5, params{5};
-                    SoftAct 6, params{6};
+
+                        ! Add Cartesian Coordinates to buffer
+            CASE 30:
+                IF nParams = 7 THEN
+                    cartesianTarget :=[[params{1},params{2},params{3}],
+                                      [params{4},params{5},params{6},params{7}],
+                                      [0,0,0,0],
+                                      externalAxis];
+                    IF BUFFER_POS < MAX_BUFFER THEN
+                        BUFFER_POS := BUFFER_POS + 1;
+                        bufferTargets{BUFFER_POS} := cartesianTarget;
+                        bufferSpeeds{BUFFER_POS} := currentSpeed;
+                    ENDIF
+                                        ! JL: what if the buffer is full?
                     ok := SERVER_OK;
                 ELSE
                     ok := SERVER_BAD_MSG;
                 ENDIF
-                    
-            CASE 30: !Add Joint coordinates to buffer
-                IF nParams = 7 THEN
-                    jointsTarget :=[[params{1},params{2},params{3},params{4},params{5},params{6}],
-                                    externalAxis];
-                    IF BUFFER_POS < MAX_BUFFER THEN
-                        BUFFER_POS := BUFFER_POS + 1;
-                        bufferTargets{BUFFER_POS} := jointsTarget;
-                        !bufferSpeeds{BUFFER_POS} := currentSpeed; !TODO
-                        bufferTimes{BUFFER_POS} := params{7};
-                    ENDIF
-                    ok := SERVER_OK;
-                ELSE
-                    ok:=SERVER_BAD_MSG;
-                ENDIF
 
-            CASE 31: !Clear Joint waypoint buffer
+                        ! Clear Cartesian Buffer
+            CASE 31:
                 IF nParams = 0 THEN
-                    BUFFER_POS := 0;	
+                    BUFFER_POS := 0;
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 32: !Get Buffer Size)
+                        ! Get Buffer Size
+            CASE 32:
                 IF nParams = 0 THEN
-                    addString := NumToStr(BUFFER_POS,2);
+                    addString := NumToStr(BUFFER_POS, 2);
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 33: !Execute moves in joint waypoint buffer as absolute joint moves
+                        ! Execute moves in cartesianBuffer as linear moves (no flushing)
+            CASE 33:
                 IF nParams = 0 THEN
-                    FOR i FROM 1 TO (BUFFER_POS) DO 
-                        !MoveAbsJ bufferTargets{i}, bufferSpeeds{i}, currentZone, currentTool \WObj:=currentWobj ;
-                        MoveAbsJ bufferTargets{i}, currentSpeed\T:=bufferTimes{i}, currentZone, currentTool \WObj:=currentWobj ;
-                    ENDFOR			
+                                      ! JL should use moveCompleted true/false?
+                    FOR i FROM 1 TO (BUFFER_POS) DO
+                        MoveL bufferTargets{i}, bufferSpeeds{i}, currentZone, currentTool \WObj:=currentWobj ;
+                    ENDFOR
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 34: !External Axis move
+                        ! External Axis move
+            CASE 34:
                 IF nParams = 6 THEN
-                    externalAxis :=[params{1},params{2},params{3},params{4},params{5},params{6}];
+                    externalAxis :=[params{1}, params{2}, params{3}, params{4}, params{5}, params{6}];
                     jointsTarget := CJointT();
                     jointsTarget.extax := externalAxis;
                     ok := SERVER_OK;
@@ -399,105 +409,111 @@ PROC main()
                     ok :=SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 35: !Specify circPoint for circular move, and then wait on toPoint
+                        ! Specify circPoint for circular move, and then wait on toPoint
+            CASE 35:
                 IF nParams = 7 THEN
-                    circPoint :=[[params{1},params{2},params{3}],
-                                [params{4},params{5},params{6},params{7}],
+                    circPoint :=[[params{1}, params{2}, params{3}],
+                                [params{4}, params{5}, params{6}, params{7}],
                                 [0,0,0,0],
                                 externalAxis];
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
 
-            CASE 36: !specify toPoint, and use circPoint specified previously
+                        ! Specify toPoint, and use circPoint specified previously
+            CASE 36:
                 IF nParams = 7 THEN
-                    cartesianTarget :=[[params{1},params{2},params{3}],
-                                        [params{4},params{5},params{6},params{7}],
-                                        [0,0,0,0],
-                                        externalAxis];
-                    MoveC circPoint, cartesianTarget, currentSpeed, currentZone, currentTool \WObj:=currentWobj ;
+                    cartesianTarget :=[[params{1}, params{2}, params{3}],
+                                      [params{4}, params{5}, params{6}, params{7}],
+                                      [0,0,0,0],
+                                      externalAxis];
+                    MoveC circPoint, cartesianTarget, currentSpeed, currentZone, currentTool \WObj:=currentWobj;
                     ok := SERVER_OK;
                 ELSE
-                    ok:=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
-				
-            CASE 98: !returns current robot info: serial number, robotware version, and robot type
+
+                        ! Returns current robot info: serial number, robotware version, and robot type
+            CASE 98:
                 IF nParams = 0 THEN
                     addString := GetSysInfo(\SerialNo) + "*";
                     addString := addString + GetSysInfo(\SWVersion) + "*";
                     addString := addString + GetSysInfo(\RobotType);
                     ok := SERVER_OK;
                 ELSE
-                    ok :=SERVER_BAD_MSG;
+                    ok := SERVER_BAD_MSG;
                 ENDIF
-			
-            CASE 99: !Close Connection
+
+                        ! Close Connection
+            CASE 99:
                 IF nParams = 0 THEN
-                    SoftDeact;
                     TPWrite "SERVER: Client has closed connection.";
                     connected := FALSE;
-                    !//Closing the server
+
+                                  ! Closing the server
                     SocketClose clientSocket;
                     SocketClose serverSocket;
 
-                    !Reinitiate the server
-                    ServerCreateAndConnect ipController,serverPort;
+                    ! Reinitiate the server
+                    ServerCreateAndConnect ipController, serverPort;
                     connected := TRUE;
                     reconnected := TRUE;
                     ok := SERVER_OK;
                 ELSE
                     ok := SERVER_BAD_MSG;
                 ENDIF
+
             DEFAULT:
                 TPWrite "SERVER: Illegal instruction code";
                 ok := SERVER_BAD_MSG;
         ENDTEST
-		
-        !Compose the acknowledge string to send back to the client
+
+        ! Compose the acknowledge string to send back to the client
         IF connected = TRUE THEN
             IF reconnected = FALSE THEN
-			    IF SocketGetStatus(clientSocket) = SOCKET_CONNECTED THEN
-				    sendString := NumToStr(instructionCode,0);
-                    sendString := sendString + " " + NumToStr(ok,0);
-                    sendString := sendString + " " + addString;
-                    SocketSend clientSocket \Str:=sendString;
-			    ENDIF
+                            IF SocketGetStatus(clientSocket) = SOCKET_CONNECTED THEN
+                                    sendString := NumToStr(instructionCode, 0);
+                            sendString := sendString + " " + NumToStr(ok, 0);
+                            sendString := sendString + " " + addString;
+                            SocketSend clientSocket \Str:=sendString;
+                            ENDIF
             ENDIF
         ENDIF
+
     ENDWHILE
 
-ERROR (LONG_JMP_ALL_ERR)
-    TPWrite "SERVER: ------";
-    TPWrite "SERVER: Error Handler:" + NumtoStr(ERRNO,0);
-    TEST ERRNO
-        CASE ERR_SOCK_CLOSED:
-            TPWrite "SERVER: Lost connection to the client.";
-            TPWrite "SERVER: Closing socket and restarting.";
-            TPWrite "SERVER: ------";
-            connected:=FALSE;
-            !//Closing the server
-            SocketClose clientSocket;
-            SocketClose serverSocket;
-            !//Reinitiate the server
-            ServerCreateAndConnect ipController,serverPort;
-            reconnected:= TRUE;
-            connected:= TRUE;
-            RETRY; 
-        DEFAULT:
-            TPWrite "SERVER: Unknown error.";
-            TPWrite "SERVER: Closing socket and restarting.";
-            TPWrite "SERVER: ------";
-            connected:=FALSE;
-            !//Closing the server
-            SocketClose clientSocket;
-            SocketClose serverSocket;
-            !//Reinitiate the server
-            ServerCreateAndConnect ipController,serverPort;
-            reconnected:= TRUE;
-            connected:= TRUE;
-            RETRY;
-    ENDTEST
+    ERROR (LONG_JMP_ALL_ERR)
+        TPWrite "SERVER: ------";
+        TPWrite "SERVER: Error Handler:" + NumtoStr(ERRNO,0);
+        TEST ERRNO
+            CASE ERR_SOCK_CLOSED:
+                TPWrite "SERVER: Lost connection to the client.";
+                TPWrite "SERVER: Closing socket and restarting.";
+                TPWrite "SERVER: ------";
+                connected:=FALSE;
+                !//Closing the server
+                SocketClose clientSocket;
+                SocketClose serverSocket;
+                !//Reinitiate the server
+                ServerCreateAndConnect ipController,serverPort;
+                reconnected:= FALSE;
+                connected:= TRUE;
+                RETRY;
+            DEFAULT:
+                TPWrite "SERVER: Unknown error.";
+                TPWrite "SERVER: Closing socket and restarting.";
+                TPWrite "SERVER: ------";
+                connected:=FALSE;
+                !//Closing the server
+                SocketClose clientSocket;
+                SocketClose serverSocket;
+                !//Reinitiate the server
+                ServerCreateAndConnect ipController,serverPort;
+                reconnected:= FALSE;
+                connected:= TRUE;
+                RETRY;
+        ENDTEST
 ENDPROC
 
 ENDMODULE
