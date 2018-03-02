@@ -11,7 +11,7 @@ Keep clear of the robot when the program is running.
 
 ### Lets wave this thing around!
 
-A video walkthough can be found on [https://www.youtube.com/watch?v=KQEwssUqV9o](https://www.youtube.com/watch?v=KQEwssUqV9o)
+Before setting up anything, you may want to check [this video walkthough](https://www.youtube.com/watch?v=KQEwssUqV9o) as well as a [live demo on a physical controller](https://github.com/garciadelcastillo/open-abb-driver). 
 
 Make sure you have correctly set up your robot or virtual controller in RobotStudio (see main `README.md`), and the `SERVER.mod` module is running. 
 
